@@ -6,6 +6,12 @@ const STORAGE_KEY = 'sologsb-1016-studio-v1'
 const clone = <T,>(value: T): T => JSON.parse(JSON.stringify(value)) as T
 const uid = (prefix: string) => `${prefix}-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 7)}`
 
+export interface DistributeResult {
+  ok: boolean
+  blocked: Array<{ code: string; title: string; durationLimit: number }>
+  lockedSum: number
+}
+
 function loadState(): StudioState {
   try {
     const raw = localStorage.getItem(STORAGE_KEY)
@@ -152,11 +158,72 @@ export function useStudio() {
     persist()
   }
 
-  function updateProject(field: 'title' | 'subtitle' | 'targetDuration', value: string | number) {
-    commit(`更新项目${field === 'title' ? '标题' : field === 'subtitle' ? '副标题' : '目标时长'}`, (document) => {
-      if (field === 'targetDuration') document.targetDuration = Number(value)
-      else document[field] = String(value)
+  function updateProject(field: 'title' | 'subtitle', value: string | number) {
+    commit(`更新项目${field === 'title' ? '标题' : '副标题'}`, (document) => {
+      document[field] = String(value)
     })
+  }
+
+  function toggleLimitLock(sceneId: string) {
+    const scene = state.value.document.scenes.find((item) => item.id === sceneId)
+    commit(`${scene?.limitLocked ? '解锁' : '锁定'} ${scene?.code ?? '场次'} 限额`, (document) => {
+      const target = document.scenes.find((item) => item.id === sceneId)
+      if (target) target.limitLocked = !target.limitLocked
+    })
+  }
+
+  // 按原限额占比把预算分到各场：先取 5 的整数倍，余量按小数部分从大到小补给各场，
+  // 不足 5 秒的零头挂在第一场，保证合计与预算分毫不差。
+  function planLimits(scenes: Scene[], budget: number): number[] {
+    const totalWeight = scenes.reduce((total, scene) => total + scene.durationLimit, 0)
+    const raw = scenes.map((scene) => (totalWeight > 0 ? (budget * scene.durationLimit) / totalWeight : budget / scenes.length))
+    const units = Math.floor(budget / 5)
+    const floors = raw.map((value) => Math.floor(value / 5))
+    let leftover = units - floors.reduce((total, value) => total + value, 0)
+    const order = raw
+      .map((value, index) => ({ index, frac: value / 5 - Math.floor(value / 5) }))
+      .sort((a, b) => b.frac - a.frac)
+    for (let k = 0; k < leftover; k += 1) floors[order[k % order.length].index] += 1
+    const limits = floors.map((unit) => unit * 5)
+    limits[0] += budget - limits.reduce((total, value) => total + value, 0)
+    for (let i = 0; i < limits.length; i += 1) {
+      if (limits[i] >= 5) continue
+      const need = 5 - limits[i]
+      let donor = -1
+      for (let j = 0; j < limits.length; j += 1) {
+        if (j !== i && limits[j] - need >= 5 && (donor < 0 || limits[j] > limits[donor])) donor = j
+      }
+      if (donor < 0) break
+      limits[i] = 5
+      limits[donor] -= need
+    }
+    return limits
+  }
+
+  function distributeLimits(nextTarget = state.value.document.targetDuration): DistributeResult {
+    const document = state.value.document
+    const locked = document.scenes.filter((scene) => scene.limitLocked)
+    const unlocked = document.scenes.filter((scene) => !scene.limitLocked)
+    const lockedSum = locked.reduce((total, scene) => total + scene.durationLimit, 0)
+    const blocked = locked.map((scene) => ({ code: scene.code, title: scene.title, durationLimit: scene.durationLimit }))
+    if (lockedSum > nextTarget || (!unlocked.length && lockedSum !== nextTarget)) {
+      return { ok: false, blocked, lockedSum }
+    }
+    if (!unlocked.length) return { ok: true, blocked: [], lockedSum }
+    const limits = planLimits(unlocked, nextTarget - lockedSum)
+    const unchanged = nextTarget === document.targetDuration && unlocked.every((scene, index) => scene.durationLimit === limits[index])
+    if (!unchanged) {
+      const detail = unlocked.map((scene, index) => `${scene.code} ${scene.durationLimit}→${limits[index]}s`).join('，')
+      const note = locked.length ? `锁定 ${locked.map((scene) => scene.code).join('、')} 保持原限额；其余按占比分摊：${detail}` : `按各场原限额占比分摊：${detail}`
+      commit(`按目标 ${nextTarget} 秒分摊场次限额`, (draft) => {
+        draft.targetDuration = nextTarget
+        for (let index = 0; index < unlocked.length; index += 1) {
+          const scene = draft.scenes.find((item) => item.id === unlocked[index].id)
+          if (scene) scene.durationLimit = limits[index]
+        }
+      }, note)
+    }
+    return { ok: true, blocked: [], lockedSum }
   }
 
   function updateScene(sceneId: string, field: keyof Scene, value: string | number) {
@@ -378,6 +445,8 @@ export function useStudio() {
     updateProject,
     updateScene,
     updateCue,
+    toggleLimitLock,
+    distributeLimits,
     addScene,
     deleteScene,
     addCue,

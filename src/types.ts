@@ -36,6 +36,7 @@ export interface Scene {
   timeOfDay: string
   transition: string
   durationLimit: number
+  limitLocked?: boolean
   cues: Cue[]
 }
 

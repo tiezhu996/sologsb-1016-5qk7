@@ -30,7 +30,8 @@ button, input, textarea { font: inherit; }
 .metric.compact strong { font-size: 20px; }
 .metric .accent { color: #73daca; }
 .metric .danger { color: #ff7a8a; }
-.target-control { display: grid; grid-template-columns: 1fr 140px; gap: 14px; align-items: center; }
+.target-control { display: grid; grid-template-columns: 1fr 140px auto; gap: 14px; align-items: center; }
+.blocked-banner { padding: 10px 24px 0; background: #0f1420; }
 .workspace { display: grid; grid-template-columns: 264px minmax(560px, 1fr) 330px; gap: 0; min-height: calc(100vh - 160px); }
 .scene-sidebar, .review-column { background: rgba(15, 20, 32, .86); }
 .scene-sidebar { padding: 22px 14px 18px; border-right: 1px solid #202938; }
