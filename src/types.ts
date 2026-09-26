@@ -36,6 +36,7 @@ export interface Scene {
   timeOfDay: string
   transition: string
   durationLimit: number
+  limitLocked?: boolean
   cues: Cue[]
 }
 
@@ -75,7 +76,7 @@ export interface StudioState {
 
 export interface WarningItem {
   id: string
-  type: 'collision' | 'missing-sfx' | 'over-time'
+  type: 'collision' | 'missing-sfx' | 'over-time' | 'locked-over'
   level: 'error' | 'warning'
   sceneId: string
   cueId?: string

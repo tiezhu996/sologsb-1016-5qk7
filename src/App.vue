@@ -26,6 +26,7 @@ const {
   selectedScene,
   totalDuration,
   pendingChanges,
+  lockedOverflow,
   warnings,
   saveState,
   durationOfCue,
@@ -33,6 +34,8 @@ const {
   updateProject,
   updateScene,
   updateCue,
+  toggleLimitLock,
+  redistributeLimits,
   addScene,
   deleteScene,
   addCue,
@@ -124,6 +127,10 @@ function openFreeze() {
   showFreezeModal.value = true
 }
 
+function onRedistribute() {
+  if (!redistributeLimits()) activeRightTab.value = 'warnings'
+}
+
 function confirmFreeze() {
   const version = freeze(freezeName.value)
   showFreezeModal.value = false
@@ -196,15 +203,21 @@ onBeforeUnmount(() => window.removeEventListener('keydown', onKeydown))
             :show-indicator="false"
             :status="totalDuration > state.document.targetDuration ? 'error' : 'success'"
           />
-          <n-input-number
-            :value="state.document.targetDuration"
-            size="small"
-            :min="30"
-            :step="10"
-            @update:value="updateProject('targetDuration', $event ?? 0)"
-          >
-            <template #suffix>秒目标</template>
-          </n-input-number>
+          <div class="target-inputs">
+            <n-input-number
+              :value="state.document.targetDuration"
+              size="small"
+              :min="30"
+              :step="10"
+              @update:value="updateProject('targetDuration', $event ?? 0)"
+            >
+              <template #suffix>秒目标</template>
+            </n-input-number>
+            <n-button size="small" secondary title="按各场占比把目标时长分摊到未锁定场次" @click="onRedistribute">分摊限额</n-button>
+          </div>
+          <n-alert v-if="lockedOverflow" class="locked-alert" type="error" :show-icon="false">
+            锁定的 {{ lockedOverflow.scenes.map((scene) => scene.code).join('、') }} 合计 {{ lockedOverflow.sum }} 秒，超过目标 {{ state.document.targetDuration }} 秒，自动分摊未生效。
+          </n-alert>
         </div>
         <div class="metric compact">
           <span>场次</span><strong>{{ state.document.scenes.length }}</strong>
@@ -239,7 +252,7 @@ onBeforeUnmount(() => window.removeEventListener('keydown', onKeydown))
                 <strong>{{ scene.code }} · {{ scene.title }}</strong>
                 <small>{{ scene.location }} / {{ scene.timeOfDay }}</small>
               </span>
-              <span class="scene-duration">{{ durationOfScene(scene).toFixed(0) }}s</span>
+              <span class="scene-duration">{{ scene.limitLocked ? '🔒' : '' }}{{ durationOfScene(scene).toFixed(0) }}/{{ scene.durationLimit }}s</span>
             </button>
           </div>
           <div class="sidebar-tip">
@@ -247,6 +260,7 @@ onBeforeUnmount(() => window.removeEventListener('keydown', onKeydown))
             <span>[ / ] 切换场次</span>
             <span>Alt + ↑ / ↓ 调整顺序</span>
             <span>⌘S 立即保存 · ⌘Z 撤销</span>
+            <span>🔒 锁定场次不参与自动分摊</span>
           </div>
           <n-button block quaternary @click="resetSample">恢复示例数据</n-button>
         </aside>
@@ -268,7 +282,14 @@ onBeforeUnmount(() => window.removeEventListener('keydown', onKeydown))
             <n-form-item label="场次号"><n-input :value="selectedScene.code" @update:value="updateScene(selectedScene.id, 'code', $event)" /></n-form-item>
             <n-form-item label="空间"><n-input :value="selectedScene.location" @update:value="updateScene(selectedScene.id, 'location', $event)" /></n-form-item>
             <n-form-item label="时间"><n-input :value="selectedScene.timeOfDay" @update:value="updateScene(selectedScene.id, 'timeOfDay', $event)" /></n-form-item>
-            <n-form-item label="场次限额（秒）"><n-input-number :value="selectedScene.durationLimit" :min="5" :step="5" @update:value="updateScene(selectedScene.id, 'durationLimit', $event ?? 0)" /></n-form-item>
+            <n-form-item label="场次限额（秒）">
+              <div class="limit-field">
+                <n-input-number :value="selectedScene.durationLimit" :min="5" :step="5" @update:value="updateScene(selectedScene.id, 'durationLimit', $event ?? 0)" />
+                <n-button size="small" :type="selectedScene.limitLocked ? 'warning' : 'default'" secondary :title="selectedScene.limitLocked ? '已锁定，自动分摊时保持原样' : '锁定后自动分摊不影响本场'" @click="toggleLimitLock(selectedScene.id)">
+                  {{ selectedScene.limitLocked ? '🔒 已锁' : '🔓 锁定' }}
+                </n-button>
+              </div>
+            </n-form-item>
             <n-form-item label="场次转场" class="span-2"><n-input :value="selectedScene.transition" @update:value="updateScene(selectedScene.id, 'transition', $event)" /></n-form-item>
           </div>
 
@@ -352,7 +373,7 @@ onBeforeUnmount(() => window.removeEventListener('keydown', onKeydown))
               <div class="review-list">
                 <div v-for="warning in warnings" :key="warning.id" class="warning-card" :class="warning.level">
                   <div class="warning-title">
-                    <n-tag size="small" :type="warning.level === 'error' ? 'error' : 'warning'" :bordered="false">{{ warning.type === 'collision' ? '撞场' : warning.type === 'missing-sfx' ? '引用' : '时长' }}</n-tag>
+                    <n-tag size="small" :type="warning.level === 'error' ? 'error' : 'warning'" :bordered="false">{{ warning.type === 'collision' ? '撞场' : warning.type === 'missing-sfx' ? '引用' : warning.type === 'locked-over' ? '锁定' : '时长' }}</n-tag>
                     <strong>{{ warning.title }}</strong>
                   </div>
                   <p>{{ warning.detail }}</p>

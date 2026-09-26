@@ -6,6 +6,35 @@ const STORAGE_KEY = 'sologsb-1016-studio-v1'
 const clone = <T,>(value: T): T => JSON.parse(JSON.stringify(value)) as T
 const uid = (prefix: string) => `${prefix}-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 7)}`
 
+/**
+ * 按各场当前限额占比，把目标时长分摊到未锁定场次。
+ * 每场先向下取整到 5 秒，余量按小数部分从大到小以 5 秒为单位补齐，
+ * 最后不足 5 秒的零头交给占比最大的一场，保证合计精确等于目标。
+ * 锁定场次合计超过目标（或没有可分摊场次）时返回 null，表示不生效。
+ */
+function planLimitDistribution(document: StudioDocument): Map<string, number> | null {
+  const unlocked = document.scenes.filter((scene) => !scene.limitLocked)
+  if (!unlocked.length) return null
+  const lockedSum = document.scenes.filter((scene) => scene.limitLocked).reduce((total, scene) => total + scene.durationLimit, 0)
+  const budget = document.targetDuration - lockedSum
+  if (budget < 0) return null
+  const base = unlocked.reduce((total, scene) => total + scene.durationLimit, 0)
+  const shares = unlocked.map((scene) => (base > 0 ? (budget * scene.durationLimit) / base : budget / unlocked.length))
+  const allocations = shares.map((share) => Math.max(0, Math.floor(share / 5) * 5))
+  let remaining = budget - allocations.reduce((total, value) => total + value, 0)
+  const order = shares
+    .map((share, index) => ({ index, remainder: share - Math.max(0, Math.floor(share / 5) * 5) }))
+    .sort((a, b) => b.remainder - a.remainder)
+  let cursor = 0
+  while (remaining >= 5 && order.length) {
+    allocations[order[cursor % order.length].index] += 5
+    remaining -= 5
+    cursor += 1
+  }
+  if (remaining > 0 && order.length) allocations[order[0].index] += remaining
+  return new Map(unlocked.map((scene, index) => [scene.id, allocations[index]]))
+}
+
 function loadState(): StudioState {
   try {
     const raw = localStorage.getItem(STORAGE_KEY)
@@ -52,9 +81,25 @@ export function useStudio() {
 
   const totalDuration = computed(() => state.value.document.scenes.reduce((total, scene) => total + durationOfScene(scene), 0))
   const pendingChanges = computed(() => state.value.pending.filter((item) => item.status === 'pending'))
+  const lockedOverflow = computed(() => {
+    const locked = state.value.document.scenes.filter((scene) => scene.limitLocked)
+    const sum = locked.reduce((total, scene) => total + scene.durationLimit, 0)
+    return locked.length && sum > state.value.document.targetDuration ? { scenes: locked, sum } : null
+  })
 
   const warnings = computed<WarningItem[]>(() => {
     const result: WarningItem[] = []
+    if (lockedOverflow.value) {
+      const { scenes, sum } = lockedOverflow.value
+      result.push({
+        id: 'locked-over-target',
+        type: 'locked-over',
+        level: 'error',
+        sceneId: scenes[0].id,
+        title: '锁定场次合计超过目标时长',
+        detail: `锁定的 ${scenes.map((scene) => scene.code).join('、')} 合计 ${sum} 秒，超过目标 ${state.value.document.targetDuration} 秒；自动分摊未生效，请解锁场次或调低锁定限额。`
+      })
+    }
     for (const scene of state.value.document.scenes) {
       const actorRoles = new Map<string, string[]>()
       for (const cue of scene.cues) {
@@ -153,10 +198,49 @@ export function useStudio() {
   }
 
   function updateProject(field: 'title' | 'subtitle' | 'targetDuration', value: string | number) {
-    commit(`更新项目${field === 'title' ? '标题' : field === 'subtitle' ? '副标题' : '目标时长'}`, (document) => {
-      if (field === 'targetDuration') document.targetDuration = Number(value)
-      else document[field] = String(value)
+    if (field === 'targetDuration') {
+      const target = Number(value)
+      const plan = planLimitDistribution({ ...state.value.document, targetDuration: target })
+      commit('更新项目目标时长', (document) => {
+        document.targetDuration = target
+        if (plan) {
+          for (const scene of document.scenes) {
+            const next = plan.get(scene.id)
+            if (next !== undefined) scene.durationLimit = next
+          }
+        }
+      }, plan ? '已按各场占比自动分摊场次限额（5 秒取整，锁定场次保持原样）。' : '锁定场次合计超过新目标，本次未自动分摊。')
+      return
+    }
+    commit(`更新项目${field === 'title' ? '标题' : '副标题'}`, (document) => {
+      document[field] = String(value)
     })
+  }
+
+  function toggleLimitLock(sceneId: string) {
+    const scene = state.value.document.scenes.find((item) => item.id === sceneId)
+    if (!scene) return
+    commit(`${scene.limitLocked ? '解锁' : '锁定'} ${scene.code} 场次限额`, (document) => {
+      const target = document.scenes.find((item) => item.id === sceneId)
+      if (target) target.limitLocked = !target.limitLocked
+    })
+  }
+
+  function redistributeLimits(): boolean {
+    const plan = planLimitDistribution(state.value.document)
+    if (!plan) return false
+    const changed = state.value.document.scenes.some((scene) => {
+      const next = plan.get(scene.id)
+      return next !== undefined && next !== scene.durationLimit
+    })
+    if (!changed) return true
+    commit('按目标时长重分场次限额', (document) => {
+      for (const scene of document.scenes) {
+        const next = plan.get(scene.id)
+        if (next !== undefined) scene.durationLimit = next
+      }
+    }, '未锁定场次按占比分摊目标时长，锁定场次保持原样。')
+    return true
   }
 
   function updateScene(sceneId: string, field: keyof Scene, value: string | number) {
@@ -371,6 +455,7 @@ export function useStudio() {
     selectedScene,
     totalDuration,
     pendingChanges,
+    lockedOverflow,
     warnings,
     saveState,
     durationOfCue,
@@ -378,6 +463,8 @@ export function useStudio() {
     updateProject,
     updateScene,
     updateCue,
+    toggleLimitLock,
+    redistributeLimits,
     addScene,
     deleteScene,
     addCue,
